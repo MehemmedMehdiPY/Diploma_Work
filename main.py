@@ -48,12 +48,13 @@ F0_CO = F0_CO * 1000 / 3600
 F0_CO2 = F0_CO2 * 1000 / 3600
 F0_H2 = F0_H2 * 1000 / 3600
 F0_H2O = F0_H2O * 1000 / 3600
+F0_total = F0_total * 1000 / 3600
 
-# kmol / s
+# mol / s
 FA0 = F0_CO
 
 # T = 501
-T = 501
+T = 478
 R = 8.3145
 eq_constant = get_eq_constant(T)
 
@@ -65,6 +66,9 @@ f_CO = F0_CO / F0_total
 f_CO2 = F0_CO2 / F0_total
 f_H2O = F0_H2O / F0_total
 f_H2 = F0_H2 / F0_total
+
+print(f_CO, f_CO2, f_H2O, f_H2)
+print(f_CO + f_CO2 + f_H2O + f_H2)
 
 X_final = 0.90
 
@@ -94,10 +98,8 @@ weight = Simpson(f=f, a=0, b=0.85, n=25000) * FA0
 volume = weight / bulk_density
 print(weight, volume)
 
-print(LH_7_3(0.85, params))
-
-Xs = np.linspace(0, 0.99, num=25000)
-plt.plot(Xs, LH_7_3(Xs, params), color="blue", label="rate")
+Xs = np.linspace(0, 0.8, num=10000)
+plt.plot(Xs, 1 / LH_7_3(Xs, params), color="blue", label="rate")
 plt.plot([0, 1], [0, 0], linestyle="--", color="red", label="0 line")
 plt.legend()
 plt.show()

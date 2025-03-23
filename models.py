@@ -122,7 +122,6 @@ class EnthalpyTemperature(Data):
                 self.cp_constants_gas_arr[self.indexes, 4] / 5 * (T ** 5 - T_ref ** 5)
             )
         else:
-            print(self.indexes)
             enthalpy_temperature_corrected = (
                 self.cp_constants_liq_arr[0, 0] / 1 * (T ** 1 - T_ref ** 1) + 
                 self.cp_constants_liq_arr[0, 1] / 2 * (T ** 2 - T_ref ** 2) + 
@@ -141,10 +140,11 @@ class EnthalpyPressure(PengRobinson):
         if indexes is None:
             indexes = np.arange(self.F.size)
         self.indexes = indexes
-        return self.get_enthalpy(T, P)
+        return self.get_enthalpy_pressure(T, P)
     
-    def get_enthalpy_pressure(self, T, P, is_H2O=False):
-        if not is_H2O:
+    def get_enthalpy_pressure(self, T, P, is_H2O=True):
+        if is_H2O:
+            """Water is negligbly compressible and pressure influence is insignificant"""
             return 0
 
         R = self.R
@@ -155,10 +155,8 @@ class EnthalpyPressure(PengRobinson):
         v_init = 0.0001
         v_real = self.approximate_v(v_init, T, P, a, b)
         Z = P * v_real / (R * T)
-        print(Z)
         B = b * P / (R * T)
         da_dT = self.get_da_dT(T, a)
-        # print((T * da_dT - a) / (2 * 2 ** 0.5 * b) )
         enthalpy_pressure_corrected = (
             R * T * (Z - 1) + (T * da_dT - a) / (2 * 2 ** 0.5 * b) * np.log(
                 (Z + (1 + 2 ** 0.5) * B) / (Z + (1 - 2 ** 0.5) * B)
@@ -171,8 +169,8 @@ class EnthalpyPressure(PengRobinson):
         return (
             -0.45724 * (self.R ** 2 * self.Tc[self.indexes] ** 2) / self.Pc[self.indexes] * \
             k * np.sqrt(a / (T * self.Tc[self.indexes]))
-            )
-    
+            )        
+
 class Enthalpy(EnthalpyTemperature, EnthalpyPressure):
     def __init__(self):
         super().__init__()
@@ -186,8 +184,7 @@ class Enthalpy(EnthalpyTemperature, EnthalpyPressure):
     
     def get_total_enthalpy(self, T, P, is_H2O):
         enthalpy_temperature_corrected = self.get_enthalpy_temperature(T, is_H2O=is_H2O)
-        enthalpy_pressure_corrected = self.get_enthalpy_pressure(T, P)
-        # print(enthalpy_temperature_corrected, enthalpy_pressure_corrected)
+        enthalpy_pressure_corrected = self.get_enthalpy_pressure(T, P, is_H2O=is_H2O)
         return enthalpy_temperature_corrected + enthalpy_pressure_corrected
 
 class EnthalpyReaction(Enthalpy):
@@ -198,8 +195,7 @@ class EnthalpyReaction(Enthalpy):
         self.F_init = self.F.copy()
         self.stoich_coefs = np.array([-1, -1, +1, +1])
         self.A0_idx = 0
-        # print(self.H_heat * self.F[self.A0_idx] * self.X_objective * 1000 / 3600)
-
+        
     def __call__(self, T, P):
         enthalpy_react = 0
         enthalpy_prod = 0
@@ -209,6 +205,7 @@ class EnthalpyReaction(Enthalpy):
                 is_H2O = True
             self.indexes = [i]
             enthalpy_react += self.get_total_enthalpy(T, P, is_H2O=is_H2O) * self.F[i] * 1000 / 3600
+        
         self.F = self.F_init + self.stoich_coefs * self.X_objective * self.F_init[self.A0_idx]
         for i in range(4):
             is_H2O = False
@@ -216,12 +213,105 @@ class EnthalpyReaction(Enthalpy):
                 is_H2O = True
             self.indexes = [i]
             enthalpy_prod += self.get_total_enthalpy(T, P, is_H2O=is_H2O) * self.F[i] * 1000 / 3600
-        enthalpy = enthalpy_prod - enthalpy_react + self.H_heat * self.X_objective * self.F[self.A0_idx]
+        enthalpy = enthalpy_prod - enthalpy_react + self.H_heat * self.X_objective * self.F_init[self.A0_idx] * 1000 / 3600
+
+        self.F = self.F_init.copy()
         return enthalpy
 
-class KineticModels:
-    def __init__(self):
-        pass
+class KineticModels(Data):
+    def __init__(self, model: str = "LH_7_3"):
+        super().__init__()
+        if model == "LH_7_3":
+            self.kinetic_model = self.LH_7_3
+            pass
+
+        self.Tc = np.array([
+            self.Tc["CO"], self.Tc["H2O"], self.Tc["CO2"], self.Tc["H2"]
+        ])
+        self.Pc = np.array([
+            self.Pc["CO"], self.Pc["H2O"], self.Pc["CO2"], self.Pc["H2"]
+        ])
+        self.w = np.array([
+            self.w["CO"], self.w["H2O"], self.w["CO2"], self.w["H2"]
+        ])
+        self.F = np.array([
+            self.F["CO"], self.F["H2O"], self.F["CO2"], self.F["H2"]
+        ])
+        self.f = self.F / self.F.sum()
+
+    def __call__(self, X, T, P):
+        return self.kinetic_model(X, T, P)
+
+    def LH_7_3(self, X, T, P):
+        """
+        J. L. Ayastuy, et al. "Kinetics of the Low-Temperature WGS Reaction over a
+                                CuO/ZnO/Al2O3 Catalyst"
+        Args:
+            X:                      conversion (float)
+            T:                      temperature (float or int)
+            P:                      pressure in Pa
+            eq_constsant:           equilibrium constant (float)
+            R:                      universal gas constant (float)
+            kwargs:                 additional argumewnts for fractions and total pressure (dict)
+        """
+        if type(X) is float or type(X) is int:
+            X = np.array([X])
+
+        # theta_CO = params["theta"]["theta_CO"]
+        # theta_CO2 = params["theta"]["theta_CO2"]
+        # theta_H2O = params["theta"]["theta_H2O"]
+        # theta_H2 = params["theta"]["theta_H2"]
+        
+        eq_constant = self.get_eq_constant(T)
+
+        ln_A0 = 16.99
+        Ea_R = 6049.2
+
+        ln_A_CO = -2.362
+        H_CO_R = 1782.1
+
+        ln_A_H2O = -3.403
+        H_H2O_R = 2088.8
+
+        ln_A_H2 = -3.459
+        H_H2_R = 2057.7
+
+        ln_A_CO2 = -5.765
+        H_CO2_R = 3003.5
+
+        k0 = np.exp(ln_A0 - Ea_R / T)
+        K_CO = np.exp(ln_A_CO - H_CO_R / T)
+        K_H2O = np.exp(ln_A_H2O - H_H2O_R / T)
+        K_H2 = np.exp(ln_A_H2 - H_H2_R / T)
+        K_CO2 = np.exp(ln_A_CO2 - H_CO2_R / T)
+
+        P_CO = P_final(PB0=P * self.f[0], PA0=P * self.f[0], X=X, stoich_coef=-1)
+        P_H2O = P_final(PB0=P * self.f[1], PA0=P * self.f[0], X=X, stoich_coef=-1)
+        P_CO2 = P_final(PB0=P * self.f[2], PA0=P * self.f[0], X=X, stoich_coef=+1)
+        P_H2 = P_final(PB0=P * self.f[3], PA0=P * self.f[0], X=X, stoich_coef=+1)
+        print(P_CO, P_H2O, P_CO2, P_H2)
+
+        nominator = k0 * (P_CO * P_H2O - P_CO2 * P_H2 / eq_constant)
+        denominator = (
+            1 + K_CO * P_CO + K_H2O * P_H2O + K_CO2 * P_CO2 * P_H2 ** 0.5 + K_H2 ** 0.5 * P_H2 ** 0.5
+            ) ** 2
+
+        # mol/ (g * h)
+        rate = nominator / denominator
+        
+        # mol/ (g * s)
+        rate = rate / 3600
+        
+        return rate
+    
+    def get_eq_constant(self, T):
+        return np.exp(
+            5693.5 / T + 1.077 * np.log(T) + 5.44 * 10 ** -4 * T - 1.125 * 10 ** -7 * T ** 2 - 49170 / T ** 2 - 13.148
+        )
+    
+    def P_final(self, PB0, PA0, X, stoich_coef: int = 1):
+        return PB0 * (1 + stoich_coef * X * PA0 / PB0)
+
 
 def P_final(PB0, PA0, X, stoich_coef: int = 1):
     return PB0 * (1 + stoich_coef * X * PA0 / PB0)
@@ -377,7 +467,7 @@ def LH_7_3(X, params):
     P_H2O = P_final(PB0=P_total * f_H2O, PA0=P_total * f_CO, X=X, stoich_coef=-1)
     P_CO2 = P_final(PB0=P_total * f_CO2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
     P_H2 = P_final(PB0=P_total * f_H2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
-
+    
     # P_CO = P_final_modified(P_total, P_total * f_CO, X, stoich_coef=-1, eps=0, theta=theta_CO)
     # P_H2O = P_final_modified(P_total, P_total * f_H2O, X, stoich_coef=-1, eps=0, theta=theta_H2O)
     # P_CO2 = P_final_modified(P_total, P_total * f_CO2, X, stoich_coef=+1, eps=0, theta=theta_CO2)
@@ -523,5 +613,6 @@ if __name__ == "__main__":
     
     # CO, H2O, CO2, H2
 
+    # Heat of reaction
     model = EnthalpyReaction(X_objective=0.95)
     print(model(T=478, P=P))
