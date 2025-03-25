@@ -1,7 +1,25 @@
 from models import EnthalpyReaction, KineticModels
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.integrate import trapezoid, simpson
 
+def get_volume():
+    X = np.linspace(0, 0.95, 5000)
+    T = 478
+    P = 34.2e5
+    model = KineticModels(X_objective=0.9)+
+    bulk_density = 1173.1 * 2.20462 / 3.28084 ** 3
+    
+    rate = model(T, P, X)
+    # print((rate < 0).sum())
+    weight = simpson(y=(- 1 / rate), x=X) * model.F[0] * 1000 / 453.592
+    print(-weight)
+    print(-weight / bulk_density / 3.28084 ** 3)
+    
+    print(rate[-1] - rate[-2])
+    plt.plot(X, rate)
+    plt.show()
+    
 def heat_versus_T():
     T = np.linspace(298, 501, 100)
     P = 34.2e5
@@ -26,14 +44,17 @@ def heat_versus_P():
     plt.show()
 
 def rate_versus_T():
-    X = np.linspace(0, 0.99, 1000)
-    X = 0.9
+    X = np.linspace(0, 0.9, 1000)
     T = 478
     P = 34.2e5
-    print(X, T, P)
-    model = KineticModels()
-    rate = model(X, T, P)
-    # plt.plot(X, rate)
-    # plt.show()
+    print(T)
+    model = KineticModels(X_objective=0.9)
+    rate = model(T, P, X)
+    print(rate.shape)
 
-rate_versus_T()
+    plt.plot(X, rate)
+    plt.show()
+
+# rate_versus_T()
+get_volume()
+# rate_versus_T()
