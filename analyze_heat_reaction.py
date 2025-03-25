@@ -7,7 +7,7 @@ def get_volume():
     X = np.linspace(0, 0.95, 5000)
     T = 478
     P = 34.2e5
-    model = KineticModels(X_objective=0.9)+
+    model = KineticModels(X_objective=0.9)
     bulk_density = 1173.1 * 2.20462 / 3.28084 ** 3
     
     rate = model(T, P, X)
