@@ -3,49 +3,73 @@ from scipy.optimize import root, minimize, Bounds
 from scipy.integrate import simpson
 from constants import Data
 
+class Solution(Data):
+    def __init__(self):
+        self.flow_rate = self.F["CO"] * 1000 / 453.592
+        
+    def __call__(self, T, P, X_objective):
+        model_temperature = OutletTemperatureProfile()
+        X_profile, T_profile, enthalpy_profile = model_temperature(T=T, P=P, X_objective=X_objective)
+
+        kinetic_model = KineticModels(model="rase")
+        rate_profile = kinetic_model(T=T_profile, P=P, X=X_profile)
+        volume, weight = self.get_volume(X_profile, rate_profile)
+        results = {
+            "X_profile": X_profile,
+            "T_profile": T_profile,
+            "rate_profile": rate_profile,
+            "enthalpy_profile": enthalpy_profile,
+            "volume": volume / 3.28084 ** 3,
+            "weight": weight / 2.20462,
+        }
+        return results
+
+    def get_volume(self, X, rates):
+        flow_rates = np.zeros(X.size)
+        flow_rates = self.flow_rate - 1 * self.flow_rate * X
+        f = 1 / rates * flow_rates
+        weight = simpson(y=f, x=X)
+        volume = weight / self.bulk_density
+        return volume, weight
+
 def inverse_ReLU(x):
     return (x if x < 0 else 0)
 
 class PengRobinson(Data):
     def __init__(self):
         self.Tc = np.array([
-            self.Tc["CO"], self.Tc["H2O"], self.Tc["CO2"], self.Tc["H2"]
+            self.Tc["CO"], self.Tc["H2O"], self.Tc["CO2"], self.Tc["H2"],
+            self.Tc["Ar"], self.Tc["N2"], self.Tc["CH4"]
         ])
         self.Pc = np.array([
-            self.Pc["CO"], self.Pc["H2O"], self.Pc["CO2"], self.Pc["H2"]
+            self.Pc["CO"], self.Pc["H2O"], self.Pc["CO2"], self.Pc["H2"],
+            self.Pc["Ar"], self.Pc["N2"], self.Pc["CH4"]
         ])
         self.w = np.array([
-            self.w["CO"], self.w["H2O"], self.w["CO2"], self.w["H2"]
+            self.w["CO"], self.w["H2O"], self.w["CO2"], self.w["H2"],
+            self.w["Ar"], self.w["N2"], self.w["CH4"]
         ])
         self.F = np.array([
-            self.F["CO"], self.F["H2O"], self.F["CO2"], self.F["H2"]
+            self.F["CO"], self.F["H2O"], self.F["CO2"], self.F["H2"],
+            self.F["Ar"], self.F["N2"], self.F["CH4"]
         ])
+
+        self.A0_idx = 0
 
         self.cp_constants_gas_arr = np.array(
             [self.cp_constants_gas["CO"],
             self.cp_constants_gas["H2O"],
             self.cp_constants_gas["CO2"],
-            self.cp_constants_gas["H2"]]
-        ).reshape(4, 5)
+            self.cp_constants_gas["H2"],
+            self.cp_constants_gas["Ar"],
+            self.cp_constants_gas["N2"],
+            self.cp_constants_gas["CH4"]]
+        ).reshape(7, 5)
 
         self.cp_constants_liq_arr = np.array(
             self.cp_constants_liq["H2O"]
         ).reshape(1, 5)
 
-        # self.Tc = np.array([
-        #     self.Tc["CO"], self.Tc["CO2"], self.Tc["H2"]
-        # ])
-        # self.Pc = np.array([
-        #     self.Pc["CO"], self.Pc["CO2"], self.Pc["H2"]
-        # ])
-        # self.w = np.array([
-        #     self.w["CO"], self.w["CO2"], self.w["H2"]
-        # ])
-        # self.F = np.array([
-        #     self.F["CO"], self.F["CO2"], self.F["H2"]
-        # ])
-
-        # self.f = self.F / self.F.sum()
         self.R = 8.3145
         self.func = lambda v, T, a, b, R: R * T / (v - b) - a / (v * (v + b) + b * (v - b))
         self.func_loss = lambda v, P, T, a, b, R: R * T / (v - b) - a / (v * (v + b) + b * (v - b)) - P
@@ -56,11 +80,9 @@ class PengRobinson(Data):
     def run(self, T, P, v = 0.001, optimize = True, indexes = None):
         if indexes is None:
             indexes = np.arange(self.F.size)
-        self.indexes = indexes
 
-        f = self.F[self.indexes] / self.F[self.indexes].sum()
-        a = self.get_am(T=T, f=f)
-        b = self.get_bm(f=f)
+        a = self.get_am(T=T, indexes=indexes)
+        b = self.get_bm(indexes=indexes)
 
         if optimize:
             v = self.approximate_v(v, T, P, a, b)
@@ -73,20 +95,25 @@ class PengRobinson(Data):
         results = root(f, x0=v, args=(P, T, a, b, self.R))
         return results.x
 
-    def get_a(self, T):
-        a_Tc = 0.45724 * self.R ** 2 * self.Tc[self.indexes] ** 2 / self.Pc[self.indexes]
-        k = self.get_k()
-        Tr = T / self.Tc[self.indexes]
+    def get_a(self, T, indexes):
+        a_Tc = 0.45724 * self.R ** 2 * self.Tc[indexes] ** 2 / self.Pc[indexes]
+        k = self.get_k(indexes)
+        Tr = T / self.Tc[indexes]
         a_Tr_w = (1 + k * (1 - np.sqrt(Tr))) ** 2
         a = a_Tc * a_Tr_w
         return a
 
-    def get_am(self, T, f):
-        a = self.get_a(T)
-        a_mat = np.zeros((len(self.indexes), len(self.indexes)))
-        f_mat = np.zeros((len(self.indexes), len(self.indexes)))
+    def get_am(self, T, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
         
-        for i in range(len(self.indexes)):
+        a = self.get_a(T, indexes=indexes)
+        a_mat = np.zeros((len(indexes), len(indexes)))
+        
+        f_mat = np.zeros((len(indexes), len(indexes)))
+        f = self.F[indexes] / self.F[indexes].sum()
+        
+        for i in range(len(indexes)):
             a_mat[i] = a * a[i]
             f_mat[i] = f * f[i]
 
@@ -95,30 +122,113 @@ class PengRobinson(Data):
             )
         return am
 
-    def get_b(self):
-        return (0.07780 * self.R * self.Tc[self.indexes] / self.Pc[self.indexes])
+    def get_Tc_m(self, indexes = None):        
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        
+        Tc = self.Tc[indexes]
+        Tc_mat = np.zeros((len(indexes), len(indexes)))
+        
+        f_mat = np.zeros((len(indexes), len(indexes)))
+        f = self.F[indexes] / self.F[indexes].sum()
+        for i in range(len(indexes)):
+            Tc_mat[i] = Tc * Tc[i]
+            f_mat[i] = f * f[i]
 
-    def get_bm(self, f):
-        return np.sum(f * self.get_b())
+        Tc_m = np.sum(
+            np.sqrt(Tc_mat) * f_mat
+            )
+        return Tc_m
 
-    def get_k(self):
-        k = 0.37464 + 1.54226 * self.w[self.indexes] - 0.26992 * self.w[self.indexes] ** 2
+    def get_Pc_m(self, indexes = None):        
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        
+        Pc = self.Pc[indexes]
+        Pc_mat = np.zeros((len(indexes), len(indexes)))
+        
+        f_mat = np.zeros((len(indexes), len(indexes)))
+        f = self.F[indexes] / self.F[indexes].sum()
+        
+        for i in range(len(indexes)):
+            Pc_mat[i] = Pc * Pc[i]
+            f_mat[i] = f * f[i]
+
+        Pc_m = np.sum(
+            np.sqrt(Pc_mat) * f_mat
+            )
+        return Pc_m
+
+    def get_b(self, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        return (0.07780 * self.R * self.Tc[indexes] / self.Pc[indexes])
+
+    def get_bm(self, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        f = self.F[indexes] / self.F[indexes].sum()
+        return np.sum(f * self.get_b(indexes))
+
+    def get_k(self, indexes):
+        k = 0.37464 + 1.54226 * self.w[indexes] - 0.26992 * self.w[indexes] ** 2
         return k
     
-    def get_da_dT(self, T, a):
+    def get_k_m(self, indexes = None):
+        """k of mixture"""
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        
+        k = self.get_k(indexes=indexes)
+        k_mat = np.zeros((len(indexes), len(indexes)))
+        
+        f_mat = np.zeros((len(indexes), len(indexes)))
+        f = self.F[indexes] / self.F[indexes].sum()
+        
+        for i in range(len(indexes)):
+            k_mat[i] = k * k[i]
+            f_mat[i] = f * f[i]
+
+        k_m = np.sum(
+            np.sqrt(k_mat) * f_mat
+            )
+        return k_m
+
+    def get_da_dT(self, T, a, indexes = None):
         """First order partial differentiation"""
-        k = self.get_k()
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        k = self.get_k_m(indexes=indexes)
+
+        # Critical temperature of mixture
+        Tc_m = self.get_Tc_m(indexes=indexes)
+
+        # Critical pressure of mixture
+        Pc_m = self.get_Pc_m(indexes=indexes)
+
         return (
-            -0.45724 * (self.R ** 2 * self.Tc[self.indexes] ** 2) / self.Pc[self.indexes] * \
-            k * np.sqrt(a / (T * self.Tc[self.indexes]))
+            -0.45724 * (self.R ** 2 * Tc_m ** 2) / Pc_m * \
+            k * np.sqrt(a / (T * Tc_m))
             )
     
-    def get_d2a_dT2(self, T, a):
+    def get_d2a_dT2(self, T, a, indexes = None):
         """Second order partial differentiation"""
-        k = self.get_k()
-        da_dT = self.get_da_dT(T, a)
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+
+        k = self.get_k_m(indexes=indexes)
+
+        # First differentiation of a with respect to T
+        da_dT = self.get_da_dT(T, a, indexes=indexes)
+
+        # Critical temperature of mixture
+        Tc_m = self.get_Tc_m(indexes=indexes)
+
+        # Critical pressure of mixture
+        Pc_m = self.get_Pc_m(indexes=indexes)
+
         return (
-            -0.45724 * (self.R ** 2 * self.Tc[self.indexes] ** 1.5) / self.Pc[self.indexes] * \
+            -0.45724 * (self.R ** 2 * Tc_m ** 1.5) / Pc_m * \
             k * 
             np.sqrt(1 / T) * 1 / 2 * np.sqrt(1 / a) * da_dT + 
             np.sqrt(a) * (-1) / 2 * np.sqrt(1 / T ** 3)
@@ -147,18 +257,39 @@ class EnthalpyTemperature(Data):
     def __call__(self, T, indexes = None, is_H2O = False):
         if indexes is None:
             indexes = np.arange(self.F.size)
-        self.indexes = indexes
-        return self.get_enthalpy_temperature(T, is_H2O)
+        return self.get_enthalpy_temperature(T, is_H2O, indexes=indexes)
     
-    def get_enthalpy_temperature(self, T, is_H2O):
+    def get_abcde_m(self, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        
+        constants = self.cp_constants_gas[indexes]
+        constants_mat = np.zeros((len(indexes), len(indexes)))
+        
+        f_mat = np.zeros((len(indexes), len(indexes)))
+        f = self.F[indexes] / self.F[indexes].sum()
+        for i in range(len(indexes)):
+            constants_mat[i] = constants * constants[i]
+            f_mat[i] = f * f[i]
+
+        constants_m = np.sum(
+            np.sqrt(constants_mat) * f_mat
+            )
+        return constants_m
+
+
+    def get_enthalpy_temperature(self, T, is_H2O = False, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+
         T_ref = 298
         if not is_H2O:
             enthalpy_temperature_corrected = (
-                self.cp_constants_gas_arr[self.indexes, 0] / 1 * (T ** 1 - T_ref ** 1) + 
-                self.cp_constants_gas_arr[self.indexes, 1] / 2 * (T ** 2 - T_ref ** 2) + 
-                self.cp_constants_gas_arr[self.indexes, 2] / 3 * (T ** 3 - T_ref ** 3) + 
-                self.cp_constants_gas_arr[self.indexes, 3] / 4 * (T ** 4 - T_ref ** 4) + 
-                self.cp_constants_gas_arr[self.indexes, 4] / 5 * (T ** 5 - T_ref ** 5)
+                self.cp_constants_gas_arr[indexes, 0] / 1 * (T ** 1 - T_ref ** 1) + 
+                self.cp_constants_gas_arr[indexes, 1] / 2 * (T ** 2 - T_ref ** 2) + 
+                self.cp_constants_gas_arr[indexes, 2] / 3 * (T ** 3 - T_ref ** 3) + 
+                self.cp_constants_gas_arr[indexes, 3] / 4 * (T ** 4 - T_ref ** 4) + 
+                self.cp_constants_gas_arr[indexes, 4] / 5 * (T ** 5 - T_ref ** 5)
             )
         else:
             enthalpy_temperature_corrected = (
@@ -170,14 +301,16 @@ class EnthalpyTemperature(Data):
             )
         return enthalpy_temperature_corrected
     
-    def get_capacity_temperature(self, T, P, v, a, b, is_H2O=False):
+    def get_capacity_temperature(self, T, is_H2O = False, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
         if not is_H2O:
             heat_capacity = (
-                    self.cp_constants_gas_arr[self.indexes, 0] * T ** 0 + 
-                    self.cp_constants_gas_arr[self.indexes, 1] * T ** 1 + 
-                    self.cp_constants_gas_arr[self.indexes, 2] * T ** 2 + 
-                    self.cp_constants_gas_arr[self.indexes, 3] * T ** 3 + 
-                    self.cp_constants_gas_arr[self.indexes, 4] * T ** 4
+                    self.cp_constants_gas_arr[indexes, 0] * T ** 0 + 
+                    self.cp_constants_gas_arr[indexes, 1] * T ** 1 + 
+                    self.cp_constants_gas_arr[indexes, 2] * T ** 2 + 
+                    self.cp_constants_gas_arr[indexes, 3] * T ** 3 + 
+                    self.cp_constants_gas_arr[indexes, 4] * T ** 4
                 )
         else:
             heat_capacity = (
@@ -196,18 +329,19 @@ class EnthalpyPressure(PengRobinson):
     def __call__(self, T, P, indexes = None):
         if indexes is None:
             indexes = np.arange(self.F.size)
-        self.indexes = indexes
-        return self.get_enthalpy_pressure(T, P)
+        return self.get_enthalpy_pressure(T, P, indexes=indexes)
     
-    def get_enthalpy_pressure(self, T, P, is_H2O=True):
+    def get_enthalpy_pressure(self, T, P, is_H2O = True, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+
         if is_H2O:
             """Water is negligbly compressible and pressure influence is insignificant"""
             return 0
-
+        
         R = self.R
-        f = self.F[self.indexes] / self.F[self.indexes].sum()
-        a = self.get_am(T, f)
-        b = self.get_bm(f)
+        a = self.get_am(T, indexes=indexes)
+        b = self.get_bm(indexes=indexes)
         
         v_init = 0.0001
         v_real = self.approximate_v(v_init, T, P, a, b)
@@ -225,7 +359,7 @@ class EnthalpyPressure(PengRobinson):
         if not is_H2O:
             # Partial differentiation of P with respect to T at v=const
             dP_dT = self.get_dP_dT(T, v, a, b)
-    
+            
             # Partial differentiation of P with respect to v at T=const
             dP_dv = self.get_dP_dv(T, v, a, b)
     
@@ -248,129 +382,226 @@ class Enthalpy(EnthalpyTemperature, EnthalpyPressure):
     def __call__(self, T, P, is_H2O = False, indexes = None, method = "enthalpy"):
         if indexes is None:
             indexes = np.arange(self.F.size)
-        self.indexes = indexes
 
         if method.lower() == "enthalpy":    
-            return self.get_total_enthalpy(T, P, is_H2O)
+            return self.get_total_enthalpy(T, P, is_H2O, indexes=indexes)
         elif method.lower() == "capacity":
-            return self.heat_capacity(T, P)
+            return self.heat_capacity(T, P, indexes=indexes)
 
-    def get_total_enthalpy(self, T, P, is_H2O):
-        enthalpy_temperature_corrected = self.get_enthalpy_temperature(T, is_H2O=is_H2O)
-        enthalpy_pressure_corrected = self.get_enthalpy_pressure(T, P, is_H2O=is_H2O)
-        return enthalpy_temperature_corrected + enthalpy_pressure_corrected
+    def get_total_enthalpy(self, T, P, is_H2O, indexes=None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        enthalpy_temperature_corrected = self.get_enthalpy_temperature(T, is_H2O=is_H2O, indexes=indexes)
+        enthalpy_pressure_corrected = self.get_enthalpy_pressure(T, P, is_H2O=is_H2O, indexes=indexes)
+        return (enthalpy_temperature_corrected + enthalpy_pressure_corrected).sum()
 
-    def heat_capacity(self, T, P, is_H2O = False):
-        f = self.F[self.indexes] / self.F[self.indexes].sum()
-        a = self.get_am(T, f)
-        b = self.get_bm(f)
+    def heat_capacity(self, T, P, is_H2O = False, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        
+        a = self.get_am(T, indexes=indexes)
+        b = self.get_bm(indexes)
         v_init = 0.0001
+
+        # Peng-Robinson method to compute real gas molar volume
         v = self.approximate_v(v_init, T, P, a, b)
-        cp_temperature = self.get_capacity_temperature(T, P, v, a, b, is_H2O=is_H2O)
+
+        cp_temperature = self.get_capacity_temperature(T, is_H2O=is_H2O, indexes=indexes)
         cp_pressure = self.get_capacity_pressure(T, P, v, a, b, is_H2O=is_H2O)
-        # cp_pressure = 0
+
         return cp_temperature + cp_pressure
 
 class EnthalpyReaction(Enthalpy):
-    def __init__(self, X_objective):
+    def __init__(self):
         super().__init__()
         self.H_heat = -41100
-        self.X_objective = X_objective
         self.F_init = self.F.copy()
-        self.stoich_coefs = np.array([-1, -1, +1, +1])
+        self.stoich_coefs = np.array([-1, -1, +1, +1, 0, 0, 0])
         self.A0_idx = 0
-        
-    def __call__(self, T, P):
-        return self.get_heat_enthalpy(T, P)    
 
-    def get_heat_enthalpy(self, T, P):
+    def __call__(self, T, P, X):
+        return self.get_heat_enthalpy(T, P, X)
+    
+    def get_theta(self, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        return self.F[indexes] / self.F[self.A0_idx]
+
+    def get_theta_m(self, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        
+        theta = self.get_theta(indexes=indexes)
+        theta_mat = np.zeros((len(indexes), len(indexes)))
+        
+        f_mat = np.zeros((len(indexes), len(indexes)))
+        f = self.F[indexes] / self.F[indexes].sum()
+        for i in range(len(indexes)):
+            theta_mat[i] = theta * theta[i]
+            f_mat[i] = f * f[i]
+
+        theta_m = np.sum(
+            np.sqrt(theta_mat) * f_mat
+            )
+        
+        return theta_m
+    
+    def get_heat_enthalpy(self, T, P, X):
         enthalpy_react = 0
         enthalpy_prod = 0
 
-        for i in range(4):
-            is_H2O = False
-            if i == 1:
-                is_H2O = True
-            self.indexes = [i]
-            enthalpy_react += self.get_total_enthalpy(T, P, is_H2O=is_H2O) * self.F[i] * 1000 / 3600
+        is_H2O = False
+        indexes = [0, 2, 3]
+        enthalpy_react += self.get_total_enthalpy(T, P, is_H2O=is_H2O, indexes=indexes) * self.F[indexes].sum() * 1000 / 3600
         
-        # Mixing considered
-        # self.indexes = [0, 2, 3]
-        # enthalpy_react += self.get_total_enthalpy(T, P, is_H2O=False) * self.F[self.indexes].sum() * 1000 / 3600
-
-        # self.indexes = [1]
-        # enthalpy_react += self.get_total_enthalpy(T, P, is_H2O=True) * self.F[self.indexes].sum() * 1000 / 3600
+        is_H2O = True
+        indexes = [1]
+        enthalpy_react += self.get_total_enthalpy(T, P, is_H2O=is_H2O, indexes=indexes) * self.F[indexes].sum() * 1000 / 3600
         
-        self.F = self.F_init + self.stoich_coefs * self.X_objective * self.F_init[self.A0_idx]
-        for i in range(4):
-            is_H2O = False
-            if i == 1:
-                is_H2O = True
-            self.indexes = [i]
-            enthalpy_prod += self.get_total_enthalpy(T, P, is_H2O=is_H2O) * self.F[i] * 1000 / 3600
-
-        # Mixing considered
-        # self.indexes = [0, 2, 3]
-        # enthalpy_prod += self.get_total_enthalpy(T, P, is_H2O=False) * self.F[self.indexes].sum() * 1000 / 3600
+        # for i in range(4):
+        #     is_H2O = False
+        #     if i == 1:
+        #         is_H2O = True
+        #     indexes = [i]
+        #     enthalpy_react += self.get_total_enthalpy(T, P, is_H2O=is_H2O, indexes=indexes) * self.F[i] * 1000 / 3600
         
-        # self.indexes = [1]
-        # enthalpy_prod += self.get_total_enthalpy(T, P, is_H2O=True) * self.F[self.indexes].sum() * 1000 / 3600
-            
-        enthalpy = enthalpy_prod - enthalpy_react + self.H_heat * self.X_objective * self.F_init[self.A0_idx] * 1000 / 3600
+        self.F = self.F_init + self.stoich_coefs * X * self.F_init[self.A0_idx]
 
+        is_H2O = False
+        indexes = [0, 2, 3]
+        enthalpy_prod += self.get_total_enthalpy(T, P, is_H2O=is_H2O, indexes=indexes) * self.F[indexes].sum() * 1000 / 3600
+
+        is_H2O = True
+        indexes = [1]
+        enthalpy_prod += self.get_total_enthalpy(T, P, is_H2O=is_H2O, indexes=indexes) * self.F[indexes].sum() * 1000 / 3600
+
+        # self.F = self.F_init + self.stoich_coefs * X * self.F_init[self.A0_idx]
+        # for i in range(4):
+        #     is_H2O = False
+        #     if i == 1:
+        #         is_H2O = True
+        #     indexes = [i]
+        #     enthalpy_prod += self.get_total_enthalpy(T, P, is_H2O=is_H2O, indexes=indexes) * self.F[i] * 1000 / 3600
+        
+        enthalpy = enthalpy_prod - enthalpy_react + self.H_heat * X * self.F_init[self.A0_idx] * 1000 / 3600
         self.F = self.F_init.copy()
-
         return enthalpy
     
 class OutletTemperature(EnthalpyReaction):
     """The class to compute outlet temperature from heat of reaction"""
-    def __init__(self, X_objective):
-        super().__init__(X_objective)
-        self.theta = self.F / self.F[self.A0_idx]
+    def __init__(self):
+        super().__init__()
     
-    def __call__(self, T, P):
+    def __call__(self, T, P, X):
+        return self.get_T_final(T, P, X)
+
+    def get_T_final(self, T, P, X, T_init_ref = None, heat_prev = 0):
+        """
+        heat_prev:          Substract previous heat.
+        T_init:             Deprecated
+        """
+        if T_init_ref is None:
+            T_init_ref = T
+ 
+        # theta_m = self.get_theta_m(indexes)
+        
+        # is_H2O = False
+        # cp_theta += self.heat_capacity(T, P, is_H2O=is_H2O, indexes=indexes) * theta_m
+        # print(cp_theta)
+
+        # indexes = [1]
+        # theta_m = self.get_theta_m(indexes)
+        
+        # is_H2O = False
+        # cp_theta += self.heat_capacity(T, P, is_H2O=is_H2O, indexes=indexes) * theta_m
+        # print(cp_theta)
+        
         cp_theta = 0
-        for i in range(4):
+        for i in range(7):
             is_H2O = False
             if i == 1:
                 is_H2O = True
-            self.indexes = [i]
-            cp_i = self.heat_capacity(T, P, is_H2O=is_H2O)
-            cp_theta += cp_i * self.theta[i]
-            
-        heat_enthalpy = self.get_heat_enthalpy(T, P)
-        T_final = T - heat_enthalpy * self.X_objective / cp_theta * np.exp(-self.X_objective * 1.3)  * np.exp(-298 / T * 5)
-        return T_final              
+            indexes = [i]
+            theta = self.get_theta(indexes=indexes)
+            cp_i = self.heat_capacity(T, P, is_H2O=is_H2O, indexes=indexes)
+            cp_theta += cp_i * theta
+        
+        heat_enthalpy = self.get_heat_enthalpy(T, P, X)
+        T_final = T - (heat_enthalpy - heat_prev) * X / cp_theta# * np.exp(-X * 1.3)  * np.exp(-298 / T_init_ref * 5)
+        return T_final[0], heat_enthalpy
 
-class KineticModels(Data):
-    def __init__(self, X_objective, model: str = "LH_7_3"):
+class OutletTemperatureProfile(OutletTemperature):
+    """
+    Method to determine temperature profile over conversion.
+    """
+    def __init__(self):
         super().__init__()
-        if model == "LH_7_3":
+        self.F_start = self.F.copy()
+    
+    def __call__(self, T, P, X_objective, n_samples=100):
+        if X_objective >= 1 or X_objective <= 0:
+            raise ValueError("X_objective should be between 0 and 1".format(X_objective))
+        T_init = T
+
+        X = np.linspace(0.0, X_objective, n_samples)
+        T_profile = np.zeros(n_samples)
+        enthalpy_profile = np.zeros(n_samples)
+
+        heat_enthalpy = 0
+        for i, X_value in enumerate(X):
+            T, heat_enthalpy = self.get_T_final(T, P, X_value, heat_prev=heat_enthalpy)
+            
+            # Pushing initial flow rates to the next case of new X value.
+            self.F_init = self.F_start + self.stoich_coefs * X_value * self.F_start[self.A0_idx]
+            
+            T_profile[i] = T
+            enthalpy_profile[i] = heat_enthalpy
+            
+        return X, T_profile, enthalpy_profile
+    
+class KineticModels(Data):
+    def __init__(self, model: str = "rase"):
+        super().__init__()
+        if model == "rase":
             self.kinetic_model = self.Rase
 
-        self.X = X_objective
         self.func = lambda T, P, X: (self.kinetic_model(T, P, X)) # / 1000 / 2.3 * np.exp(-X)
         
         self.Tc = np.array([
-            self.Tc["CO"], self.Tc["H2O"], self.Tc["CO2"], self.Tc["H2"]
+            self.Tc["CO"], self.Tc["H2O"], self.Tc["CO2"], self.Tc["H2"],
+            self.Tc["Ar"], self.Tc["N2"], self.Tc["CH4"]
         ])
         self.Pc = np.array([
-            self.Pc["CO"], self.Pc["H2O"], self.Pc["CO2"], self.Pc["H2"]
+            self.Pc["CO"], self.Pc["H2O"], self.Pc["CO2"], self.Pc["H2"],
+            self.Pc["Ar"], self.Pc["N2"], self.Pc["CH4"]
         ])
         self.w = np.array([
-            self.w["CO"], self.w["H2O"], self.w["CO2"], self.w["H2"]
+            self.w["CO"], self.w["H2O"], self.w["CO2"], self.w["H2"],
+            self.w["Ar"], self.w["N2"], self.w["CH4"]
         ])
         self.F = np.array([
             self.F["CO"], self.F["H2O"], self.F["CO2"], self.F["H2"],
             self.F["Ar"], self.F["N2"], self.F["CH4"]
         ])
-        self.F_total = self.F.sum()
 
+        # self.Tc = np.array([
+        #     self.Tc["CO"], self.Tc["H2O"], self.Tc["CO2"], self.Tc["H2"]
+        # ])
+        # self.Pc = np.array([
+        #     self.Pc["CO"], self.Pc["H2O"], self.Pc["CO2"], self.Pc["H2"]
+        # ])
+        # self.w = np.array([
+        #     self.w["CO"], self.w["H2O"], self.w["CO2"], self.w["H2"]
+        # ])
+        # self.F = np.array([
+        #     self.F["CO"], self.F["H2O"], self.F["CO2"], self.F["H2"],
+        #     self.F["Ar"], self.F["N2"], self.F["CH4"]
+        # ])
+
+        self.F_total = self.F.sum()
         self.f = self.F / self.F_total
-        
-    def __call__(self, T, P, X=None):
-        if X is None:
-            X = self.X
+
+    def __call__(self, T, P, X):
         return self.func(T, P, X)
 
     def get_final_f(self, X, f_A0, f_B0, stoich_coef):
@@ -380,7 +611,9 @@ class KineticModels(Data):
         if type(X) is float or type(X) is int:
             X = np.array([X])
         T = T / (5 / 9)
-        bulk_density = 1173.1 * 2.20462 / 3.28084 ** 3
+
+        # bulk_density = 1173.1 * 2.20462 / 3.28084 ** 3
+        bulk_density = self.bulk_density
 
         k = np.exp(12.88 - 3340 / T) # for copper-zinc catalyst
         K = np.exp(-4.72 + 8640 / T)
@@ -392,9 +625,6 @@ class KineticModels(Data):
         f_final_H2 = self.get_final_f(X, self.F[0], self.F[3], +1) / self.F_total
         
         rate = A * k * (f_final_CO * f_final_H2O - f_final_CO2 * f_final_H2 / K) / (379 * bulk_density)
-        
-        K = 162.2926
-        k = 8901.193
         
         return rate
 
@@ -547,6 +777,87 @@ class KineticModels(Data):
     def P_final(self, PB0, PA0, X, stoich_coef: int = 1):
         return PB0 * (1 + stoich_coef * X * PA0 / PB0)
 
+class PressureDrop(Data):
+    def __init__(self):
+        self.Tc = np.array([
+            self.Tc["CO"], self.Tc["H2O"], self.Tc["CO2"], self.Tc["H2"]
+        ])
+        self.Pc = np.array([
+            self.Pc["CO"], self.Pc["H2O"], self.Pc["CO2"], self.Pc["H2"]
+        ])
+        self.w = np.array([
+            self.w["CO"], self.w["H2O"], self.w["CO2"], self.w["H2"]
+        ])
+        self.F = np.array([
+            self.F["CO"], self.F["H2O"], self.F["CO2"], self.F["H2"],
+            self.F["Ar"], self.F["N2"], self.F["CH4"]
+        ])
+        self.nu_const = np.array([
+            self.nu_gas["CO"], self.nu_gas["H2O"], self.nu_gas["CO2"], self.nu_gas["H2"],
+            self.nu_gas["Ar"], self.nu_gas["N2"], self.nu_gas["CH4"]
+            ]
+         )
+        
+        self.Mw = np.array([
+            self.Mw["CO"], self.Mw["H2O"], self.Mw["CO2"], self.Mw["H2"],
+            self.Mw["Ar"], self.Mw["N2"], self.Mw["CH4"]
+        ])
+        
+        self.F_total = self.F.sum()
+
+        self.f = self.F / self.F_total
+
+        # g/mol or kg/kmol
+        self.Mw_mixture = (self.f * self.Mw).sum()
+        
+        # Particle diameter
+        self.dP = self.diameter / 1000
+
+        # Bulk density in kg/m^3
+        self.bulk_density = self.bulk_density / self.conversion
+        self.PR_model = PengRobinson()
+        
+    def __call__(self, T0, P0, T, weight, A_cross):
+        indexes = [0, 2, 3, 4, 5, 6]
+        nu = self.get_viscosity_mixture(T=T, indexes=indexes)
+        print(nu)
+
+        # m^3 / mol
+        volume = self.PR_model(T0, P0, optimize=True, indexes=indexes)
+        print(volume)
+        
+        # kg/m^3
+        density = self.Mw_mixture / volume / 1000
+
+        # catalyst_density = bulk_density / (1 - self.porosity)
+        
+        # m^3 / s
+        volumetic_flowrate = self.F_total * volume * 1000 / 3600
+
+        # m / s
+        velocity = volumetic_flowrate / A_cross
+
+        # superficial velocity (kg / m^2 s)
+        G = density * velocity
+
+        term_1 = (150 * (1 - self.porosity) * nu) / self.dP
+        term_2 = 1.75 * G
+        beta = G * (1 - self.porosity) / (density * self.dP * self.porosity ** 3) * term_1 * term_2
+        alfa = beta / (A_cross * self.bulk_density)
+        P = np.sqrt(P0**2 - 2 * alfa * T / T0 * P0 * weight)
+        print(P / 10 ** 5)
+        return P - P0
+        
+    def get_viscosity(self, T, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        return (self.nu_const[indexes, 0] + self.nu_const[indexes, 1] * T + self.nu_const[indexes, 2] * T ** 2) * 10 ** -7
+
+    def get_viscosity_mixture(self, T, indexes = None):
+        if indexes is None:
+            indexes = np.arange(self.F.size)
+        return (self.get_viscosity(T, indexes) * self.f[indexes]).sum()
+    
 class Cost(Data):
     def __init__(self, func, X_objective, kinetic_model_name):
         self.func = func
@@ -593,287 +904,6 @@ class Optimization(Data):
 def P_final(PB0, PA0, X, stoich_coef: int = 1):
     return PB0 * (1 + stoich_coef * X * PA0 / PB0)
 
-def P_final_modified(P_total, Pi_init, X, stoich_coef: int = 1, theta: float = 1, eps: float = 0):
-    """
-    theta = FB0 / FA0
-    """
-    P_ref = 10e5
-    p = P_total / P_ref
-    Pi_final = Pi_init * (theta + stoich_coef * X) / (1 + eps * X) * p
-    return Pi_final
-
-def R_eq_1(X, params):
-    """
-    Seyed R. J., et al. "Simulation and optimization of water gas shift process in ammonia plant: 
-                        Maximizing CO conversion and controlling methanol byproduct"
-
-    Problem: The model has the suspicious value of a rate constant and no description for units is provided.
-
-    Args:
-        X:                      conversion (float)
-        T:                      temperature (float or int)
-        eq_constsant:           equilibrium constant (float)
-        R:                      universal gas constant (float)
-        kwargs:                 additional argumewnts for fractions and total pressure (dict)
-    """
-    T = params["T"]
-    eq_constant = params["eq_constant"]
-    R = 8.3145
-    P_total = params["P_total"] / 10 ** 5
-    f_CO = params["fractions"]["f_CO"]
-    f_CO2 = params["fractions"]["f_CO2"]
-    f_H2O = params["fractions"]["f_H2O"]
-    f_H2 = params["fractions"]["f_H2"]
-        
-    P_CO = P_final(PB0=P_total * f_CO, PA0=P_total * f_CO, X=X, stoich_coef=-1)
-    P_H2O = P_final(PB0=P_total * f_H2O, PA0=P_total * f_CO, X=X, stoich_coef=-1)
-    P_CO2 = P_final(PB0=P_total * f_CO2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
-    P_H2 = P_final(PB0=P_total * f_H2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
-
-    return (
-        2.96 * 10 ** 5 * np.exp(-47400 / R / T) * \
-            (P_CO * P_H2O - P_CO2 * P_H2 / eq_constant)
-    )
-
-def LH_1_3(X, params):
-    """
-    J. L. Ayastuy, et al. "Kinetics of the Low-Temperature WGS Reaction over a
-                            CuO/ZnO/Al2O3 Catalyst"
-    """
-    if type(X) is float or type(X) is int:
-        X = np.array([X])
-    eq_constant = params["eq_constant"]
-    T = params["T"]
-    P_total = params["P_total"] / 10 ** 5
-    f_CO = params["fractions"]["f_CO"]
-    f_CO2 = params["fractions"]["f_CO2"]
-    f_H2O = params["fractions"]["f_H2O"]
-    f_H2 = params["fractions"]["f_H2"]
-    
-    ln_A0 = 18.38
-    Ea_R = 6940.6
-
-    ln_A_CO = -1.735
-    H_CO_R = 1370.5
-
-    ln_A_H2O = -3.051
-    H_H2O_R = 1800.0
-
-    ln_A_H2 = -3.100
-    H_H2_R = 1743.7
-
-    ln_A_CO2 = -3.322
-    H_CO2_R = 1978.0
-
-    k0 = np.exp(ln_A0 - Ea_R / T)
-    K_CO = np.exp(ln_A_CO - H_CO_R / T)
-    K_H2O = np.exp(ln_A_H2O - H_H2O_R / T)
-    K_H2 = np.exp(ln_A_H2 - H_H2_R / T)
-    K_CO2 = np.exp(ln_A_CO2 - H_CO2_R / T)
-    
-    P_CO = P_final(PB0=P_total * f_CO, PA0=P_total * f_CO, X=X, stoich_coef=-1)
-    P_H2O = P_final(PB0=P_total * f_H2O, PA0=P_total * f_CO, X=X, stoich_coef=-1)
-    P_CO2 = P_final(PB0=P_total * f_CO2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
-    P_H2 = P_final(PB0=P_total * f_H2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
-
-    nominator = k0 * (P_CO * P_H2O - P_CO2 * P_H2 / eq_constant)
-    denominator = (
-        1 + K_CO * P_CO + K_H2O * P_H2O + K_CO2 * P_CO2 + K_H2 * P_H2
-        ) ** 2
-
-    # mol/ (g * h)
-    rate = nominator / denominator
-    
-    # mol/ (g * s)
-    rate = rate / 3600
-    
-    # 1 / s
-    rate = rate * 28
-    return rate
-
-def LH_7_3(X, params):
-    """
-    J. L. Ayastuy, et al. "Kinetics of the Low-Temperature WGS Reaction over a
-                            CuO/ZnO/Al2O3 Catalyst"
-    Args:
-        X:                      conversion (float)
-        T:                      temperature (float or int)
-        P:                      pressure in Pa
-        eq_constsant:           equilibrium constant (float)
-        R:                      universal gas constant (float)
-        kwargs:                 additional argumewnts for fractions and total pressure (dict)
-    """
-
-    if type(X) is float or type(X) is int:
-        X = np.array([X])
-    eq_constant = params["eq_constant"]
-    T = params["T"]
-    P_total = params["P_total"] / 10 ** 5
-    f_CO = params["fractions"]["f_CO"]
-    f_CO2 = params["fractions"]["f_CO2"]
-    f_H2O = params["fractions"]["f_H2O"]
-    f_H2 = params["fractions"]["f_H2"]
-
-    theta_CO = params["theta"]["theta_CO"]
-    theta_CO2 = params["theta"]["theta_CO2"]
-    theta_H2O = params["theta"]["theta_H2O"]
-    theta_H2 = params["theta"]["theta_H2"]
-    
-    ln_A0 = 16.99
-    Ea_R = 6049.2
-
-    ln_A_CO = -2.362
-    H_CO_R = 1782.1
-
-    ln_A_H2O = -3.403
-    H_H2O_R = 2088.8
-
-    ln_A_H2 = -3.459
-    H_H2_R = 2057.7
-
-    ln_A_CO2 = -5.765
-    H_CO2_R = 3003.5
-
-    k0 = np.exp(ln_A0 - Ea_R / T)
-    K_CO = np.exp(ln_A_CO - H_CO_R / T)
-    K_H2O = np.exp(ln_A_H2O - H_H2O_R / T)
-    K_H2 = np.exp(ln_A_H2 - H_H2_R / T)
-    K_CO2 = np.exp(ln_A_CO2 - H_CO2_R / T)
-
-    P_CO = P_final(PB0=P_total * f_CO, PA0=P_total * f_CO, X=X, stoich_coef=-1)
-    P_H2O = P_final(PB0=P_total * f_H2O, PA0=P_total * f_CO, X=X, stoich_coef=-1)
-    P_CO2 = P_final(PB0=P_total * f_CO2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
-    P_H2 = P_final(PB0=P_total * f_H2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
-    
-    # P_CO = P_final_modified(P_total, P_total * f_CO, X, stoich_coef=-1, eps=0, theta=theta_CO)
-    # P_H2O = P_final_modified(P_total, P_total * f_H2O, X, stoich_coef=-1, eps=0, theta=theta_H2O)
-    # P_CO2 = P_final_modified(P_total, P_total * f_CO2, X, stoich_coef=+1, eps=0, theta=theta_CO2)
-    # P_H2 = P_final_modified(P_total, P_total * f_H2, X, stoich_coef=+1, eps=0, theta=theta_H2)
-
-    nominator = k0 * (P_CO * P_H2O - P_CO2 * P_H2 / eq_constant)
-    denominator = (
-        1 + K_CO * P_CO + K_H2O * P_H2O + K_CO2 * P_CO2 * P_H2 ** 0.5 + K_H2 ** 0.5 * P_H2 ** 0.5
-        ) ** 2
-
-    # mol/ (g * h)
-    rate = nominator / denominator
-    
-    # mol/ (g * s)
-    rate = rate / 3600
-    
-    return rate
-
-def Power_Law(X, params):
-    if type(X) is float or type(X) is int:
-        X = np.array([X])
-    
-    T = params["T"]
-    eq_constant = params["eq_constant"]
-    P_total = params["P_total"] / 10 ** 5
-    f_CO = params["fractions"]["f_CO"]
-    f_CO2 = params["fractions"]["f_CO2"]
-    f_H2O = params["fractions"]["f_H2O"]
-    f_H2 = params["fractions"]["f_H2"]
-
-    ln_A0 = 19.25
-    Ea = 79.7e3
-    k = np.exp(ln_A0 - Ea / 8.3145 / T)
-    
-    a = 0.47
-    b = 0.72
-    c = -0.65
-    d = -0.38
-
-    P_CO = P_final(PB0=P_total * f_CO, PA0=P_total * f_CO, X=X, stoich_coef=-1)
-    P_H2O = P_final(PB0=P_total * f_H2O, PA0=P_total * f_CO, X=X, stoich_coef=-1)
-    P_CO2 = P_final(PB0=P_total * f_CO2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
-    P_H2 = P_final(PB0=P_total * f_H2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
-    
-    beta = 1 - P_H2 * P_CO2 / (P_CO * P_H2O) * 1 / eq_constant
-    
-    # mol/ (g * h)
-    rate = k * (P_CO ** a) * (P_H2O ** b) * (P_H2 ** c) * (P_CO2 ** d) * (1 - beta)
-
-    # mol/ (g * s)
-    rate = rate / 3600
-    
-    # 1 / s
-    rate = rate * 28
-    return rate
-
-def R_eq__(X, params, threshold: float = 0):
-    """
-    Diogo M., et al. "Determination of the Low-Temperature Water-Gas Shift Reaction Kinetics Using
-                        a Cu-Based Catalyst"
-
-    The model has the suspicious value of a rate constant and no description for units is provided.
-
-    Args:
-        X:                      conversion (float)
-        T:                      temperature (float or int)
-        eq_constsant:           equilibrium constant (float)
-        R:                      universal gas constant (float)
-        kwargs:                 additional argumewnts for fractions and total pressure (dict)
-    """
-    eq_constant = params["eq_constant"]
-    P_total = params["P_total"]
-    f_CO = params["fractions"]["f_CO"]
-    f_CO2 = params["fractions"]["f_CO2"]
-    f_H2O = params["fractions"]["f_H2O"]
-    f_H2 = params["fractions"]["f_H2"]
-
-    k0 = 3.101e-4
-    K_CO2 = 1.882e-2
-
-    # CO
-    P_CO = P_final(P_total * f_CO, X, -1)
-    
-    # H2O
-    P_H2O = P_final(P_total * f_H2O, X, -1)
-
-    # CO2
-    P_CO2 = P_final(P_total * f_CO2, X, +1)
-
-    # H2
-    P_H2 = P_final(P_total * f_H2, X, +1)
-
-    nominator = k0 * (P_H2O - P_CO2 * P_H2 / (eq_constant * P_CO))
-    denominator = (
-        1 + K_CO2 * P_CO2 / P_CO
-        )
-    ratio = nominator / denominator
-    return (
-        ratio
-    )
-
-def Temkin(X, params):
-    if type(X) is float or type(X) is int:
-        X = np.array([X])
-    
-    T = params["T"]
-    eq_constant = np.exp(4577.8 / T - 4.33)
-    P_total = params["P_total"] / 10 ** 5
-    f_CO = params["fractions"]["f_CO"]
-    f_CO2 = params["fractions"]["f_CO2"]
-    f_H2O = params["fractions"]["f_H2O"]
-    f_H2 = params["fractions"]["f_H2"]
-
-    P_CO = P_final(PB0=P_total * f_CO, PA0=P_total * f_CO, X=X, stoich_coef=-1)
-    P_H2O = P_final(PB0=P_total * f_H2O, PA0=P_total * f_CO, X=X, stoich_coef=-1)
-    P_CO2 = P_final(PB0=P_total * f_CO2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
-    P_H2 = P_final(PB0=P_total * f_H2, PA0=P_total * f_CO, X=X, stoich_coef=+1)
-
-    beta = 1 - P_H2 * P_CO2 / (P_CO * P_H2O) * 1 / eq_constant
-
-    k = 6 * 10 ** 11 * np.exp(-26800 / (1.987 * T))
-    k = k * 101325
-    
-    A = 2.5 * 10 ** 9 * np.exp(-21500 / (1.987 * T))
-
-    rate = k * P_H2O * P_CO * (1 - beta) / (A * P_H2O + P_CO2)
-
-    return rate
-
 def get_eq_constant(T):
     return np.exp(
         5693.5 / T + 1.077 * np.log(T) + 5.44 * 10 ** -4 * T - 1.125 * 10 ** -7 * T ** 2 - 49170 / T ** 2 - 13.148
@@ -897,6 +927,61 @@ if __name__ == "__main__":
     T = 475
     # print(model(T=T, P=P, indexes=[3], method="capacity"))
 
-    model = OutletTemperature(X_objective=0.9)
-    Tout = model(T, P)
-    print(Tout)
+    # model = OutletTemperature(X_objective=0.9)
+    # Tout = model(T, P)
+    # print(Tout)
+
+    # model = PressureDrop()
+    # weight = 1173.1 * 50
+    # d = 4
+    # A_cross = np.pi * d ** 2 / 4
+    # print(model(T0=478, P0=34.2e5, T=501, weight=weight, A_cross=A_cross))
+    # # EnthalpyTemperature()
+
+
+    # import matplotlib.pyplot as plt
+
+    # model = OutletTemperatureProfile()
+    # X, T_profile, enthalpy_profile = model(T=478, P=34.2e5, X_objective=0.9)
+    
+    # # plt.plot(X, -enthalpy_profile)
+    # # plt.show()
+
+    # # plt.plot(X, T_profile)
+    # # plt.show()
+
+    # model = KineticModels()
+
+    # print(X.shape, T_profile.shape)
+    # rates = model(T=T_profile, P=34.2e5, X=X)
+
+    # plt.plot(X, rates)
+    # plt.show()
+
+    # print(rates.shape)
+    T = 478
+    P = 34.2 * 10 ** 5
+    X_objective = 0.9
+    solution_model = Solution()
+    results = solution_model(T, P, X_objective)
+    print(results["weight"], results["volume"])
+
+    import matplotlib.pyplot as plt
+
+    # plt.title("Rate profile versus Conversion")
+    # plt.xlabel("Conversion")
+    # plt.ylabel("Rate")
+    # plt.plot(results["X_profile"], results["rate_profile"])
+    # plt.savefig("./images/rate_profile.png")
+
+    # plt.title("Heat profile versus Conversion")
+    # plt.xlabel("Conversion")
+    # plt.ylabel("Heat")
+    # plt.plot(results["X_profile"], results["enthalpy_profile"])
+    # plt.savefig("./images/heat_profile.png")
+
+    plt.title("Temperature profile versus Conversion")
+    plt.xlabel("Conversion")
+    plt.ylabel("Temperature")
+    plt.plot(results["X_profile"], results["T_profile"])
+    plt.savefig("./images/temperature_profile.png")
