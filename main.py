@@ -1,109 +1,94 @@
-from integration_approximation import Trapezoidal, Simpson
-from models import R_eq_1, LH_1_3, LH_7_3, get_eq_constant, Power_Law, Temkin
+from scipy.integrate import simpson
+
+class Solution(Data):
+    def __init__(self):
+        super().__init__()
+        self.flow_rate = self.F["CO"] * 1000 / 453.592
+
+        """The model to provide temperature/enthalpy/instantaneous temperature change profile versus conversion across reactor"""
+        self.model_temperature = OutletTemperatureProfile()
+
+        """The model to provide pressure profile across reactor
+        (will be removed in the future)
+        """
+        self.model_pressure_drop = PressureDrop()
+
+        """The model to provide reaction rate profile across reactor"""
+        self.kinetic_model = KineticModels(model="rase")
+    
+    def __call__(self, T, P, X_objective, ld_ratio = 0.67):
+        designer = MechanicalDesign()
+
+        X_profile, T_profile, enthalpy_profile, dTs = self.model_temperature(T=T, P=P, X_objective=X_objective, n_samples=100)
+        
+        rate_profile = self.kinetic_model(T=T_profile, P=P, X=X_profile)
+        rate_profile[rate_profile < 1e-6] = 1e-7
+        volume, weight = self.get_volume_weight(X_profile, rate_profile)
+        diameter = (volume * 4 / np.pi / ld_ratio) ** (1 / 3)
+        height = diameter * ld_ratio
+        
+
+        mechanical_design_results = designer(T=T, P=P, volume=volume, ld_ratio=ld_ratio)
+        
+        # A_cross = np.pi / 4 * diameter ** 2
+        # pressure_drop_profile = self.model_pressure_drop(T0=T, P0=P, T=T_profile, weight=weight, A_cross=A_cross)
+        
+        results = {
+            "volume": volume,
+            "weight": weight,
+            "diameter": diameter,
+            "height": height,
+            "X_profile": X_profile,
+            "temperature_profile": T_profile,
+            "temperature_change_profile": dTs,
+            "rate_profile": rate_profile,
+            "enthalpy_profile": enthalpy_profile.cumsum(),
+            # "pressure_drop_profile": pressure_drop_profile,
+            "pressure": P,
+            "initial_temperature": T,
+            "final_temperature": T_profile[-1],
+            "final_enthalpy": enthalpy_profile[-1],
+            "final_rate": rate_profile[-1],
+            # "pressure_drop": pressure_drop_profile[-1],
+            "mechanical_design": mechanical_design_results
+        }
+        return results
+    
+    def get_volume_weight(self, X, rates):
+        # First, we convert flow rate to lb-mol since kinetic model expects units like this
+        flow_rate = self.F["CO"] * 1000 / 453.592
+
+        # Flow rate profile across reactor with respect to conversion
+        flow_rates = np.zeros(X.size)
+        flow_rates = flow_rate - 1 * flow_rate * X
+
+        # This function should be integrated to compute weight of catalyst
+        f = 1 / rates * flow_rates
+        weight = simpson(y=f, x=X)
+
+        # And volume of reactor. self.bulk_density comes from Data class
+        volume = weight / self.bulk_density
+        volume = volume / 3.28084 ** 3
+        weight = weight / 2.20462
+        return volume, weight
+
+
+from models import OutletTemperatureProfile, KineticModels, Data
+# from models_try import OutletTemperatureProfile, KineticModels, Data
 import matplotlib.pyplot as plt
 import numpy as np
 
-class F:
-    def __init__(self, rate_function, params: dict, eps: float = 1e-16):
-        self.rate_function = rate_function
-        self.params = params
-        self.eps = eps
-
-    def __call__(self, X):
-        """
-        The function used in integral(fx * dx) to compute area with integration approximation methods.
-
-        Returns:
-            value of weight at each range of X
-        """
-
-        if type(X) is float or type(X) is int:
-            X = np.array([X])
-        
-        rate = self.rate_function(X, self.params)
-        # rate[rate == 0] = np.inf
-        return (
-            - 1 / rate
-        )
-
-# kmol / h
-# FA0 = 100807.8964
-
-# kmol / hr
-# F0_CO = 266 
-# F0_CO2 = 1239
-# F0_H2 = 4726
-# F0_H2O = 2712
-
-# From first semester material balance.
-F0_CO = 289.64
-F0_CO2 = 1844.69
-F0_H2 = 7503.02
-F0_H2O = 4082.96
-
-F0_total = (F0_CO + F0_CO2 + F0_H2 + F0_H2O)
-
-# mol / s
-F0_CO = F0_CO * 1000 / 3600
-F0_CO2 = F0_CO2 * 1000 / 3600
-F0_H2 = F0_H2 * 1000 / 3600
-F0_H2O = F0_H2O * 1000 / 3600
-F0_total = F0_total * 1000 / 3600
-
-# mol / s
-FA0 = F0_CO
-
-# T = 501
 T = 478
-R = 8.3145
-eq_constant = get_eq_constant(T)
+P = 32.4e5
+X_objective = 0.9
 
-# kPa
-# P_total = 34.6 * 10**5
-P_total = 34.6 * 10**5
+model = OutletTemperatureProfile()
+X, T_profile, enthalpy_profile, dTs = model(T=T, P=P, X_objective=X_objective, n_samples=100)
+model = KineticModels()
+rates = model(T=T_profile, P=P, X=X_objective)
 
-f_CO = F0_CO / F0_total
-f_CO2 = F0_CO2 / F0_total
-f_H2O = F0_H2O / F0_total
-f_H2 = F0_H2 / F0_total
-
-print(f_CO, f_CO2, f_H2O, f_H2)
-print(f_CO + f_CO2 + f_H2O + f_H2)
-
-X_final = 0.90
-
-params = {
-    # "R": 8.3145,
-    "T": T,
-    "P_total": P_total,
-    "fractions": {
-        "f_CO": f_CO,
-        "f_CO2": f_CO2,
-        "f_H2O": f_H2O,
-        "f_H2": f_H2
-    },
-    "theta": {
-        "theta_CO": F0_CO / F0_CO,
-        "theta_CO2": F0_CO2 / F0_CO,
-        "theta_H2O": F0_H2O / F0_CO,
-        "theta_H2": F0_H2 / F0_CO
-    },
-    "eq_constant": eq_constant,
-}
-
-bulk_density = 1173.1
-
-f = F(rate_function=LH_7_3, params=params)
-weight = Simpson(f=f, a=0, b=0.85, n=25000) * FA0
-volume = weight / bulk_density
-print(weight, volume)
-
-Xs = np.linspace(0, 0.8, num=10000)
-plt.plot(Xs, 1 / LH_7_3(Xs, params), color="blue", label="rate")
-plt.plot([0, 1], [0, 0], linestyle="--", color="red", label="0 line")
-plt.legend()
+plt.plot(X, T_profile)
 plt.show()
 
-# plt.plot(Xs, f(Xs), color="blue", label="rate")
-# plt.legend()
-# plt.show()
+plt.plot(X, rates)
+plt.show()

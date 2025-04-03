@@ -429,7 +429,14 @@ class EnthalpyReaction(Enthalpy):
         indexes = np.array([1])
         enthalpy_react += self.get_total_enthalpy(T, P, is_H2O=is_H2O, indexes=indexes) * self.F[indexes].sum() * 1000 / 3600
         
-        self.F = self.F_init + self.stoich_coefs * X * self.F_init[self.A0_idx]
+        # for i in range(4):
+        #     is_H2O = False
+        #     if i == 1:
+        #         is_H2O = True
+        #     indexes = [i]
+        #     enthalpy_react += self.get_total_enthalpy(T, P, is_H2O=is_H2O, indexes=indexes) * self.F[i] * 1000 / 3600
+        
+        self.F = self.F_init + self.stoich_coefs * X * self.F_start[self.A0_idx]
         
         is_H2O = False
         indexes = np.array([0, 2, 3])
@@ -439,6 +446,14 @@ class EnthalpyReaction(Enthalpy):
         indexes = np.array([1])
         enthalpy_prod += self.get_total_enthalpy(T, P, is_H2O=is_H2O, indexes=indexes) * self.F[indexes].sum() * 1000 / 3600
 
+        # self.F = self.F_init + self.stoich_coefs * X * self.F_init[self.A0_idx]
+        # for i in range(4):
+        #     is_H2O = False
+        #     if i == 1:
+        #         is_H2O = True
+        #     indexes = [i]
+        #     enthalpy_prod += self.get_total_enthalpy(T, P, is_H2O=is_H2O, indexes=indexes) * self.F[i] * 1000 / 3600
+        
         enthalpy = enthalpy_prod - enthalpy_react + self.H_heat * X * self.F_init[self.A0_idx] * 1000 / 3600
         self.F = self.F_init.copy()
         return enthalpy
@@ -451,12 +466,27 @@ class OutletTemperature(EnthalpyReaction):
     def __call__(self, T, P, X):
         return self.get_T_final(T, P, X)
 
-    def get_T_final(self, T, P, X):
+    def get_T_final(self, T, P, X, T_init_ref = None, heat_enthalpy_previous = 0, heat_prev = 0, T_prev = None, X_prev = None):
         """
         heat_prev:          Substract previous heat.
         T_init:             Deprecated
         """
-       
+        if T_init_ref is None:
+            T_init_ref = T
+
+        # theta_m = self.get_theta_m(indexes)
+        
+        # is_H2O = False
+        # cp_theta += self.heat_capacity(T, P, is_H2O=is_H2O, indexes=indexes) * theta_m
+        # print(cp_theta)
+
+        # indexes = [1]
+        # theta_m = self.get_theta_m(indexes)
+        
+        # is_H2O = False
+        # cp_theta += self.heat_capacity(T, P, is_H2O=is_H2O, indexes=indexes) * theta_m
+        # print(cp_theta)
+        
         cp_theta = 0
         self.F = self.F_init + self.stoich_coefs * X * self.F_init[self.A0_idx]
         for i in range(7):
@@ -464,16 +494,16 @@ class OutletTemperature(EnthalpyReaction):
             if i == 1:
                 is_H2O = True
             indexes = np.array([i])
-            # theta = self.get_theta(indexes=indexes)
-            theta = self.F[indexes] * 1000 / 3600
+            theta = self.get_theta(indexes=indexes)
             cp_i = self.heat_capacity(T, P, is_H2O=is_H2O, indexes=indexes)
             cp_theta += cp_i * theta
 
         self.F = self.F_init.copy()
         heat_enthalpy = self.get_heat_enthalpy(T, P, X)
 
-        dT = -heat_enthalpy / cp_theta # / 25
-        T_final = T + dT
+        dT = -heat_enthalpy / cp_theta
+        T_final = T + dT        
+        # print((heat_enthalpy - heat_prev), T, X)
         return T_final[0], heat_enthalpy, dT
 
 class OutletTemperatureProfile(OutletTemperature):
@@ -494,11 +524,19 @@ class OutletTemperatureProfile(OutletTemperature):
         T_profile = np.zeros(n_samples)
         enthalpy_profile = np.zeros(n_samples)
         dTs = np.zeros(n_samples)
-        
+        heat_enthalpy = 0
+        X_prev = 0
+        T_prev = T
         for i, X_value in enumerate(X):
-            T, heat_enthalpy, dT = self.get_T_final(T=T, P=P, X=X_change)
+            # print(self.F_init)
+            T, heat_enthalpy, dT = self.get_T_final(T=T, P=P, X=X_change, #heat_enthalpy_previous=heat_enthalpy, 
+                                                T_prev=T_prev, X_prev=X_prev,
+                                                heat_prev=heat_enthalpy)
             # Pushing initial flow rates to the next case of new X value.
             self.F_init = self.F_start + self.stoich_coefs * X_value * self.F_start[self.A0_idx]
+            # X_change = (1 - self.F_start[self.A0_idx] * (1 - X_value) / self.F_init[self.A0_idx])
+            X_prev = X_value
+            T_prev = T
             T_profile[i] = T
             enthalpy_profile[i] = heat_enthalpy
             dTs[i] = dT
@@ -814,3 +852,79 @@ def get_eq_constant(T):
         5693.5 / T + 1.077 * np.log(T) + 5.44 * 10 ** -4 * T - 1.125 * 10 ** -7 * T ** 2 - 49170 / T ** 2 - 13.148
     )
 
+if __name__ == "__main__":
+    # model = PengRobinson()
+    P = 34.2 * 10 ** 5
+    # indexes = np.array([0, 2, 3])
+    # v = model(T=478, P=P, v=0.0001, optimize=True, indexes=indexes)
+    # print(v)
+    # P_calc = model(T=478, P=P, v=v, optimize=False, indexes=indexes)
+    # print(P_calc, P - P_calc)
+    
+    # CO, H2O, CO2, H2
+    # Heat of reaction
+    # model = EnthalpyReaction(X_objective=0.95)
+    # print(model(T=478, P=P))
+    
+    # model = Enthalpy()
+    T = 475
+    # print(model(T=T, P=P, indexes=[3], method="capacity"))
+
+    # model = OutletTemperature(X_objective=0.9)
+    # Tout = model(T, P)
+    # print(Tout)
+
+    # model = PressureDrop()
+    # weight = 1173.1 * 50
+    # d = 4
+    # A_cross = np.pi * d ** 2 / 4
+    # print(model(T0=478, P0=34.2e5, T=501, weight=weight, A_cross=A_cross))
+    # # EnthalpyTemperature()
+
+
+    # import matplotlib.pyplot as plt
+
+    # model = OutletTemperatureProfile()
+    # X, T_profile, enthalpy_profile = model(T=478, P=34.2e5, X_objective=0.9)
+    
+    # # # plt.plot(X, -enthalpy_profile)
+    # # # plt.show()
+
+    # plt.plot(X, T_profile)
+    # plt.show()
+
+    # model = KineticModels()
+
+    # print(X.shape, T_profile.shape)
+    # rates = model(T=T_profile, P=34.2e5, X=X)
+
+    # plt.plot(X, rates)
+    # plt.show()
+
+    # print(rates.shape)
+    
+    # import matplotlib.pyplot as plt
+
+    # plt.title("Rate profile versus Conversion")
+    # plt.xlabel("Conversion")
+    # plt.ylabel("Rate")
+    # plt.plot(results["X_profile"], results["rate_profile"])
+    # plt.savefig("./images/rate_profile.png")
+
+    # plt.title("Heat profile versus Conversion")
+    # plt.xlabel("Conversion")
+    # plt.ylabel("Heat")
+    # plt.plot(results["X_profile"], results["enthalpy_profile"])
+    # plt.savefig("./images/heat_profile.png")
+
+    # plt.title("Temperature profile versus Conversion")
+    # plt.xlabel("Conversion")
+    # plt.ylabel("Temperature")
+    # plt.plot(results["X_profile"], results["T_profile"])
+    # plt.savefig("./images/temperature_profile.png")
+
+    # plt.title("Pressure Drop versus Conversion")
+    # plt.xlabel("Conversion")
+    # plt.ylabel("Pressure Drop")
+    # plt.plot(results["X_profile"], results["pressure_drop"])
+    # plt.savefig("./images/pressure_drop_profile.png")
