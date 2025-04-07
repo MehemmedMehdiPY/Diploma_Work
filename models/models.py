@@ -1,10 +1,40 @@
-# import numpy as np
 import numpy as np
 from scipy.optimize import root
 from constants import Data
 
-def inverse_ReLU(x):
-    return (x if x < 0 else 0)
+class SaturationTemperature(Data):
+    def __init__(self):
+        self.sat_constants = self.sat_constants["H2O"]
+        self.func = lambda T: (133.32236836846923 * 10 ** (
+            self.sat_constants[0] + self.sat_constants[1] / T + self.sat_constants[2] * np.log10(T)
+            + self.sat_constants[3] * T + self.sat_constants[4] * T ** 2
+            ))
+        self.func_loss = lambda T, P: (133.32236836846923 / 10 ** 5 * 10 ** (
+            self.sat_constants[0] + self.sat_constants[1] / T + self.sat_constants[2] * np.log10(T)
+            + self.sat_constants[3] * T + self.sat_constants[4] * T ** 2
+            ) - P
+            )
+        
+    def __call__(self, P, T = 500, optimize = True):
+        return self.run(T, P, optimize=optimize)
+        
+    def run(self, T, P, optimize = True):
+
+        if optimize:
+            T_sat = self.approximate_sat_T(T, P)
+            return T_sat
+        else:
+            return self.func(T)
+
+    def approximate_sat_T(self, T, P):
+        P = P / 10 ** 5
+        f = self.func_loss
+        args = (P, )
+        results = root(f, x0=T, args=args)
+        return results.x    
+
+    def get_sat_temp(self, T):
+        return self.func(T)
 
 class PengRobinson(Data):
     def __init__(self):
@@ -226,6 +256,9 @@ class EnthalpyTemperature(Data):
             self.cp_constants_liq["H2O"]
         ).reshape(1, 5)
 
+        self.saturation_estimator = SaturationTemperature()
+        self.vap_enthalpy = VaporizationEnthalpy()
+
     def __call__(self, T, indexes = None, is_H2O = False):
         if indexes is None:
             indexes = np.arange(self.F.size)
@@ -251,9 +284,9 @@ class EnthalpyTemperature(Data):
 
 
     def get_enthalpy_temperature(self, T, is_H2O = False, indexes = None):
-        if indexes is None:
+        if indexes is None and not is_H2O:
             indexes = np.arange(self.F.size)
-
+        
         T_ref = 298
         if not is_H2O:
             enthalpy_temperature_corrected = (
@@ -264,17 +297,32 @@ class EnthalpyTemperature(Data):
                 self.cp_constants_gas_arr[indexes, 4] / 5 * (T ** 5 - T_ref ** 5)
             )
         else:
-            enthalpy_temperature_corrected = (
-                self.cp_constants_liq_arr[0, 0] / 1 * (T ** 1 - T_ref ** 1) + 
-                self.cp_constants_liq_arr[0, 1] / 2 * (T ** 2 - T_ref ** 2) + 
-                self.cp_constants_liq_arr[0, 2] / 3 * (T ** 3 - T_ref ** 3) + 
-                self.cp_constants_liq_arr[0, 3] / 4 * (T ** 4 - T_ref ** 4) + 
-                self.cp_constants_liq_arr[0, 4] / 5 * (T ** 5 - T_ref ** 5)
+            T_sat = 100 + 273.15
+            
+            enthalpy_liquid = (
+                self.cp_constants_liq_arr[0, 0] / 1 * (T_sat ** 1 - T_ref ** 1) + 
+                self.cp_constants_liq_arr[0, 1] / 2 * (T_sat ** 2 - T_ref ** 2) + 
+                self.cp_constants_liq_arr[0, 2] / 3 * (T_sat ** 3 - T_ref ** 3) + 
+                self.cp_constants_liq_arr[0, 3] / 4 * (T_sat ** 4 - T_ref ** 4)
             )
+
+            enthalpy_vaporization = self.vap_enthalpy()
+
+            enthalpy_gas = (
+                self.cp_constants_gas_arr[1, 0] / 1 * (T ** 1 - T_sat ** 1) + 
+                self.cp_constants_gas_arr[1, 1] / 2 * (T ** 2 - T_sat ** 2) + 
+                self.cp_constants_gas_arr[1, 2] / 3 * (T ** 3 - T_sat ** 3) + 
+                self.cp_constants_gas_arr[1, 3] / 4 * (T ** 4 - T_sat ** 4) + 
+                self.cp_constants_gas_arr[1, 4] / 5 * (T ** 5 - T_sat ** 5)
+            )
+
+            enthalpy_temperature_corrected = (
+                enthalpy_liquid + enthalpy_vaporization + enthalpy_gas
+                )
         return enthalpy_temperature_corrected
     
-    def get_capacity_temperature(self, T, is_H2O = False, indexes = None):
-        if indexes is None:
+    def get_capacity_temperature(self, T, P, is_H2O = False, indexes = None):
+        if indexes is None and not is_H2O:
             indexes = np.arange(self.F.size)
         if not is_H2O:
             heat_capacity = (
@@ -285,11 +333,21 @@ class EnthalpyTemperature(Data):
                     self.cp_constants_gas_arr[indexes, 4] * T ** 4
                 )
         else:
-            heat_capacity = (
-                    self.cp_constants_liq_arr[0, 0] * T ** 0 + 
-                    self.cp_constants_liq_arr[0, 1] * T ** 1 + 
-                    self.cp_constants_liq_arr[0, 2] * T ** 2 + 
-                    self.cp_constants_liq_arr[0, 3] * T ** 3
+            T_sat = self.saturation_estimator(P=P, optimize=True)
+            if T < T_sat:
+                heat_capacity = (
+                        self.cp_constants_liq_arr[0, 0] * T ** 0 + 
+                        self.cp_constants_liq_arr[0, 1] * T ** 1 + 
+                        self.cp_constants_liq_arr[0, 2] * T ** 2 + 
+                        self.cp_constants_liq_arr[0, 3] * T ** 3
+                    )
+            else:
+                heat_capacity = (
+                    self.cp_constants_gas_arr[1, 0] * T ** 0 + 
+                    self.cp_constants_gas_arr[1, 1] * T ** 1 + 
+                    self.cp_constants_gas_arr[1, 2] * T ** 2 + 
+                    self.cp_constants_gas_arr[1, 3] * T ** 3 + 
+                    self.cp_constants_gas_arr[1, 4] * T ** 4
                 )
         return heat_capacity
     
@@ -298,10 +356,10 @@ class EnthalpyPressure(PengRobinson):
         super().__init__()
         self.R = 8.3145
 
-    def __call__(self, T, P, indexes = None):
+    def __call__(self, T, P, indexes = None, is_H2O=False):
         if indexes is None:
             indexes = np.arange(self.F.size)
-        return self.get_enthalpy_pressure(T, P, indexes=indexes)
+        return self.get_enthalpy_pressure(T, P, indexes=indexes, is_H2O=is_H2O)
     
     def get_enthalpy_pressure(self, T, P, is_H2O = True, indexes = None):
         if indexes is None:
@@ -345,6 +403,23 @@ class EnthalpyPressure(PengRobinson):
             heat_capacity = 0
         return heat_capacity
 
+class VaporizationEnthalpy(Data):
+    def __init__(self):
+        """The method to compute enthalpy of vaporization only for water"""
+        self.vaporization_constants = self.vaporization_constants["H2O"]
+        self.Tc_H2O = self.Tc["H2O"]
+
+    def __call__(self):
+        return self.get_vaporization_enthalpy()
+    
+    def get_vaporization_enthalpy(self):
+        T = 100 + 273.15
+        return (
+            # J/mol
+            self.vaporization_constants[0] * (1 - T / self.vaporization_constants[1]) ** self.vaporization_constants[2] 
+            * 1000
+            )
+
 class Enthalpy(EnthalpyTemperature, EnthalpyPressure):
     def __init__(self):
         super().__init__()
@@ -377,7 +452,7 @@ class Enthalpy(EnthalpyTemperature, EnthalpyPressure):
         # Peng-Robinson method to compute real gas molar volume
         v = self.approximate_v(T, P, a, b)
 
-        cp_temperature = self.get_capacity_temperature(T, is_H2O=is_H2O, indexes=indexes)
+        cp_temperature = self.get_capacity_temperature(T, P=P, is_H2O=is_H2O, indexes=indexes)
         cp_pressure = self.get_capacity_pressure(T, P, v, a, b, is_H2O=is_H2O)
 
         return cp_temperature + cp_pressure
@@ -814,3 +889,6 @@ def get_eq_constant(T):
         5693.5 / T + 1.077 * np.log(T) + 5.44 * 10 ** -4 * T - 1.125 * 10 ** -7 * T ** 2 - 49170 / T ** 2 - 13.148
     )
 
+if __name__ == "__main__":
+    model = EnthalpyTemperature()
+    model.get_capacity_temperature(T=500, P=26.2e5, is_H2O=True)

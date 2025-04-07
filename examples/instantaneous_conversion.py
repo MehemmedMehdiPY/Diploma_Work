@@ -14,19 +14,21 @@ F = np.array([
         ])
 stoichs = np.array([-1, -1, +1, +1, 0, 0, 0])
 
-T = 469.902
+# 476.813
+
+T = 455.48
 P = 10.0e5
-ld_ratio = 5.0
+ld_ratio = 3.0
 
 model = OutletTemperatureProfile()
 Xs, Ts, Hs, dTs = model(T, P, X_objective=0.9)
 
 
-plt.plot(Xs, Ts)
-plt.show()
+# plt.plot(Xs, Ts)
+# plt.show()
 
-plt.plot(Xs, Hs.cumsum())
-plt.show()
+# plt.plot(Xs, Hs.cumsum())
+# plt.show()
 print(Ts[-1])
 
 X = Xs
@@ -41,3 +43,6 @@ F_new = F + stoichs * F[0] * X[50]
 print(F_new.tolist())
 
 print(Ts[49], Ts[50])
+
+print(np.abs(Ts - 476.813).argmin())
+print(Ts[62], Ts[63], Ts[63] - Ts[62])

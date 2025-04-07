@@ -68,7 +68,7 @@ class MechanicalDesign:
         return wall_thickness_vessel
 
     def get_wall_thickness_head(self, P_design, diameter_internal):
-        wall_thickness_head = P_design * diameter_internal / (2 * self.stress_max * self.joint_efficiency - 0.2 * P_design)
+        wall_thickness_head = P_design * diameter_internal / (4 * self.stress_max * self.joint_efficiency - 0.4 * P_design)
         wall_thickness_head = wall_thickness_head + self.wall_thickness_min
         return wall_thickness_head
 
@@ -180,13 +180,13 @@ class Solution(Data):
         """The model to provide reaction rate profile across reactor"""
         self.kinetic_model = KineticModels(model="rase")
     
-    def __call__(self, T, P, X_objective, ld_ratio = 0.67):
+    def __call__(self, T, P, X_objective, ld_ratio = 0.67, n_samples = 100):
         designer = MechanicalDesign()
 
-        X_profile, T_profile, enthalpy_profile, dTs = self.model_temperature(T=T, P=P, X_objective=X_objective, n_samples=100)
+        X_profile, T_profile, enthalpy_profile, dTs = self.model_temperature(T=T, P=P, X_objective=X_objective, n_samples=n_samples)
         
         rate_profile = self.kinetic_model(T=T_profile, P=P, X=X_profile)
-        rate_profile[rate_profile < 1e-6] = 1e-7
+        rate_profile[rate_profile < 1e-6] = 1e-6
         volume, weight = self.get_volume_weight(X_profile, rate_profile)
         diameter = (volume * 4 / np.pi / ld_ratio) ** (1 / 3)
         height = diameter * ld_ratio
@@ -419,35 +419,39 @@ class Optimization:
         return jac_mat
         
 
-# Optimization results:
-#       T = 469.902
+if __name__ == "__main__":
+    # Optimization results:
+    T = 455.4792
+    P = 10.0e5
+    ld_ratio = 3
+    # T = 300
+    # P = 20.0 * 10 ** 5
+    # ld_ratio = 1.01
+    # print(T, P, ld_ratio)
 
-# T = 300
-# P = 20.0 * 10 ** 5
-# ld_ratio = 1.01
-# print(T, P, ld_ratio)
-
-# optimizer = Optimization()
-# results = optimizer(T, P, ld_ratio)
-# print(results)
+    # optimizer = Optimization()
+    # results = optimizer(T, P, ld_ratio)
+    # print(results)
 
 
+    # import matplotlib.pyplot as plt
 
-# import matplotlib.pyplot as plt
+    # T = 470.8312
+    # P = 28.2 * 10 ** 5
 
-T = 470.8312
-P = 10.0 * 10 ** 5
+    solver = Solution()
+    results = solver(T=T, P=P, X_objective=0.9, ld_ratio=3.0)
 
-solver = Solution()
-results = solver(T=T, P=P, X_objective=0.9, ld_ratio=3.0)
+    # print(results["volume"], results["final_rate"], results["final_temperature"])
 
-print(results["final_temperature"])
+    # plt.plot(results["X_profile"], results["temperature_profile"])
+    # plt.show()
 
-# plt.plot(results["X_profile"], results["temperature_profile"])
-# plt.show()
+    # plt.plot(results["X_profile"], results["enthalpy_profile"])
+    # plt.show()
 
-# plt.plot(results["X_profile"], results["enthalpy_profile"])
-# plt.show()
-
-# plt.plot(results["X_profile"], results["rate_profile"])
-# plt.show()
+    # plt.plot(results["X_profile"], results["rate_profile"])
+    # plt.show()
+    print(results["mechanical_design"]["weight_vessel"])
+    print(results["mechanical_design"]["weight_head"])
+    print(results["mechanical_design"]["weight_total"])

@@ -67,6 +67,26 @@ class Data:
     F["Total"] = F["CO"] + F["H2O"] + F["CO2"] + F["H2"] + F["Ar"] + F["N2"] + F["CH4"]
     # F["Total"] = F["CO"] + F["CO2"] + F["H2"]
 
+    sat_constants = {
+        "CO": np.array([np.nan, np.nan, np.nan, np.nan, np.nan]),
+        "H2O": np.array([29.8605, -3152.2, -7.3037, 2.4247E-09, 1.809E-06]),
+        "CO2": np.array([np.nan, np.nan, np.nan, np.nan, np.nan]),
+        "H2": np.array([np.nan, np.nan, np.nan, np.nan, np.nan]),
+        "Ar": np.array([np.nan, np.nan, np.nan, np.nan, np.nan]),
+        "N2": np.array([np.nan, np.nan, np.nan, np.nan, np.nan]),
+        "CH4": np.array([np.nan, np.nan, np.nan, np.nan, np.nan])
+    }
+
+    vaporization_constants = {
+        "CO": np.array([np.nan, np.nan, np.nan]),
+        "H2O": np.array([52.053, 647.13, 0.321]),
+        "CO2": np.array([np.nan, np.nan, np.nan]),
+        "H2": np.array([np.nan, np.nan, np.nan]),
+        "Ar": np.array([np.nan, np.nan, np.nan]),
+        "N2": np.array([np.nan, np.nan, np.nan]),
+        "CH4": np.array([np.nan, np.nan, np.nan])
+    }
+
     cp_constants_gas = {
         "CO": np.array([29.556, -6.5807e-5, 2.013e-5, -1.2227e-8, 2.2617e-12]),
         "H2O": np.array([33.933, -8.4186e-3, 2.9906e-5, -1.7825e-8, 3.6934e-12]),

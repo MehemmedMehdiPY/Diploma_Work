@@ -14,12 +14,15 @@ F = np.array([
         ])
 stoichs = np.array([-1, -1, +1, +1, 0, 0, 0])
 
-T = 470.831
+
 P = 10.0e5
-ld_ratio = 5.0
+ld_ratio = 3.0
 
 model = PengRobinson()
-volume = model(T=T, P=P, v=0.001, optimize=True, indexes=[0, 2, 3, 4, 5, 6])
-print(volume)
+# indexes=[0, 2, 3, 4, 5, 6]
+T = 480.83
+# T = 455.53
+indexes = None
 
-print(model(T, P, indexes=[0]))
+volume = model(T=T, P=P, v=0.001, optimize=True, indexes=indexes)
+print(volume)
